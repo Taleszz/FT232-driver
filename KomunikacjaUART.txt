@@ -1,0 +1,163 @@
+
+;Initialization of Program Memory (Flash) and Data Memory (RAM)
+.org 0x0100
+	.dseg
+		buffer: .byte 32      ; Reserve 32 bytes in SRAM
+
+	.cseg
+		cursor:	 .db	">",$00
+		newline: .db	0x0A,0x0D,$00
+		test:    .db	"TEST",$00
+		msg1:	 .db	"msg1",$00
+	
+;Initialization of UART configuration 
+    .equ	baud	= 9600			
+	.equ	bps	= (8000000/8/baud) - 1	
+	ldi	r16,LOW(bps)			
+	ldi	r17,HIGH(bps)			
+
+;Configuration of UART
+	sts	UBRR0L,r16					
+	sts	UBRR0H,r17					
+	ldi	r16,(1<<RXEN0)|(1<<TXEN0)	
+	sts	UCSR0B,r16			        
+
+;Initialization of X buffer (RAM)
+	ldi XL, low(buffer)
+	ldi XH, high(buffer)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;Jumping to the main loop of the programe to avoid accidental entrance into subroutines
+	jmp main_loop
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;Subroutine defining a short delay
+	delay:
+		ldi r20, 0x80
+		ALA3 : ldi r19,0xff
+		ALA2 : ldi r18,0xff
+		ALA1 : DEC R18
+		BRNE ALA1
+		DEC R19
+		BRNE ALA2
+		DEC r20
+		BRNE ALA3
+		brne delay
+	ret
+
+;(echo_start, echo, echo_wait and echo_end)
+;Subroutines defining a way to send back received messages (through subroutines recieve)
+
+echo_start:
+						;Reseting pointer X
+	ldi XL, low(buffer)
+	ldi XH, high(buffer)
+	jmp echo
+echo:	
+	ld	r22,X+				; load character from RAM buffer
+	cpi	r22,$0D			; check for CR (Carriage Return)
+	breq	echo_end			; branch if CR
+
+;If the recieved character is not CR then go to echo_wait else branch to echo_end (i.e. return from subroutines)
+echo_wait:
+	lds	r19,UCSR0A			; load UCSR0A (control and status register) into r19
+	sbrs	r19,UDRE0			; wait for empty transmit buffer UDRE0 (transmit shift register)
+	rjmp	echo_wait			; repeat subloop until UDRE0 is empty
+	sts	UDR0,r22			; transmit character
+	rjmp	echo				; repeat entire loop
+
+;If character is CR:
+echo_end:
+						;shift pointer to start of the buffer
+	ldi XL, low(buffer)		 
+	ldi XH, high(buffer)
+ret						
+
+;(send_char, send_str, send_str_wait, send_str_end
+;Subroutines defining a way to send a message from program memory
+
+send_char:	
+	lds	r17,UCSR0A			; load UCSR0A (control and status register) into r17
+ 	sbrs	r17,UDRE0			; wait for empty transmit buffer UDRE0 (transmit shift register)
+	rjmp	send_char			; repeat loop until UDRE0 is empty
+	sts	UDR0,r18			; transmit character
+ret
+
+
+send_str:	
+	lpm	r18,Z+				
+	cpi	r18,$00			
+	breq	send_str_end			
+
+send_str_wait:
+	lds	r19,UCSR0A			
+	sbrs	r19,UDRE0			
+	rjmp	send_str_wait		
+	sts	UDR0,r18			
+	rjmp	send_str			
+
+send_str_end:				;breq utility
+ret					
+
+
+
+
+;(receive_str, recieve_str_end)
+;subroutines to get an entire word and echo it back (through subroutine echo_start)
+
+recieve_str:	
+	lds	r17,UCSR0A			; load UCSR0A (control and status register) into r17
+	sbrs	r17,RXC0			; wait for empty transmit buffer UDRE0 (transmit shift register)
+	rjmp	receive_str			; repeat loop until UDRE0 is empty
+
+	lds	r20,UDR0			; get received character
+	cpi	r20,0x0D			; check received char for CR
+	breq	receive_str_end		; branch if CR is received
+
+	st	X+,r20				; store character to RAM buffer
+	rjmp	receive_str			; get another character
+
+
+recieve_str_end:
+	st	X+,r20				;preparing RAM buffer for echoing
+	ldi r20, 0x00     
+	st X+, r20        
+	
+	rcall echo_start			
+ret					
+
+
+;(receive_char)
+;subroutine to get one character and immediately echo it back (through send_char)
+recieve_char:	
+	lds	r17,UCSR0A			; load UCSR0A (control and status register) into r17
+	sbrs	r17,RXC0			; wait for empty receive buffer RXC0
+	rjmp	receive_char			; repeat loop until RXC0 is empty
+	lds	r18,UDR0			; receive character
+	rcall send_char			; echo it back
+ret					
+
+;(send_cursor, send_newline)
+;subroutines to make operation enjoyable :D	
+send_cursor:
+	ldi	ZL,LOW(2*cursor)		; load Z pointer with cursor address
+	ldi	ZH,HIGH(2*cursor)		
+	rcall	send_str			; transmit string
+ret
+
+send_newline:
+	ldi	ZL,LOW(2*newline)		
+	ldi	ZH,HIGH(2*newline)		
+	rcall	send_str
+ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; main loop of the program
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+main_loop:
+	rcall send_cursor
+	rcall receive_str
+	rcall send_newline
+jmp main_loop
